@@ -1,0 +1,257 @@
+'use strict'
+
+const fs = require('node:fs')
+const path = require('node:path')
+const {
+  parseMinAge,
+  isSha,
+  extractUses,
+  parseUsesValue,
+  ageInDays,
+  allowMatches
+} = require('./lib')
+
+// ---- Actions I/O helpers (no @actions/core dependency) ----------------------
+
+function getInput (name, fallback = '') {
+  const key = `INPUT_${name.replace(/ /g, '_').toUpperCase()}`
+  const v = process.env[key]
+  return v === undefined || v === '' ? fallback : v
+}
+
+function getMultiline (name) {
+  return getInput(name)
+    .split(/\r?\n/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+}
+
+function setOutput (name, value) {
+  const f = process.env.GITHUB_OUTPUT
+  if (!f) return
+  const v = typeof value === 'string' ? value : JSON.stringify(value)
+  // multiline-safe heredoc form
+  const delim = `ghadelim_${name}`
+  fs.appendFileSync(f, `${name}<<${delim}\n${v}\n${delim}\n`)
+}
+
+function summary (md) {
+  const f = process.env.GITHUB_STEP_SUMMARY
+  if (f) fs.appendFileSync(f, md + '\n')
+}
+
+function annotate (level, file, line, msg) {
+  const loc = file ? ` file=${file}${line ? `,line=${line}` : ''}` : ''
+  // newlines are not allowed in annotation messages
+  console.log(`::${level}${loc}::${msg.replace(/\n/g, ' ')}`)
+}
+
+// ---- GitHub REST client (native fetch) --------------------------------------
+
+class GitHub {
+  constructor (token) {
+    this.base = process.env.GITHUB_API_URL || 'https://api.github.com'
+    this.token = token
+  }
+
+  async get (pathname) {
+    const res = await fetch(`${this.base}${pathname}`, {
+      headers: {
+        accept: 'application/vnd.github+json',
+        'x-github-api-version': '2022-11-28',
+        'user-agent': 'action-age-check',
+        ...(this.token ? { authorization: `Bearer ${this.token}` } : {})
+      }
+    })
+    if (res.status === 404) return { status: 404, body: null }
+    if (!res.ok) {
+      throw new Error(`GitHub API ${res.status} for ${pathname}: ${await res.text()}`)
+    }
+    return { status: res.status, body: await res.json() }
+  }
+}
+
+// ---- age resolution ---------------------------------------------------------
+
+// Resolve the "publication date" of a remote use, preferring trustworthy bases.
+// Returns { date, basis, note? } | { branch:true } | { notFound:true }
+async function resolveAge (gh, use) {
+  const { owner, repo, ref } = use
+
+  if (isSha(ref)) {
+    const c = await gh.get(`/repos/${owner}/${repo}/commits/${ref}`)
+    if (c.status === 404) return { notFound: true }
+    return {
+      date: c.body.commit.committer.date,
+      basis: 'commit',
+      note: 'commit date is not the publish date; vulnerable to tag re-pointing'
+    }
+  }
+
+  // 1) GitHub Release published_at (most trustworthy)
+  const rel = await gh.get(`/repos/${owner}/${repo}/releases/tags/${encodeURIComponent(ref)}`)
+  if (rel.status !== 404 && rel.body && rel.body.published_at) {
+    return { date: rel.body.published_at, basis: 'release' }
+  }
+
+  // 2) Annotated tag tagger.date
+  const tref = await gh.get(`/repos/${owner}/${repo}/git/ref/tags/${encodeURIComponent(ref)}`)
+  if (tref.status !== 404 && tref.body) {
+    const obj = tref.body.object
+    if (obj.type === 'tag') {
+      const tag = await gh.get(`/repos/${owner}/${repo}/git/tags/${obj.sha}`)
+      if (tag.body && tag.body.tagger && tag.body.tagger.date) {
+        return { date: tag.body.tagger.date, basis: 'annotated-tag' }
+      }
+    }
+    // 3) lightweight tag -> underlying commit date (fallback)
+    const c = await gh.get(`/repos/${owner}/${repo}/commits/${obj.sha}`)
+    if (c.body) {
+      return {
+        date: c.body.commit.committer.date,
+        basis: 'commit',
+        note: 'lightweight tag; using commit date (not publish date)'
+      }
+    }
+  }
+
+  // branch ref -> mutable, age undefined
+  const bref = await gh.get(`/repos/${owner}/${repo}/git/ref/heads/${encodeURIComponent(ref)}`)
+  if (bref.status !== 404) return { branch: true }
+
+  return { notFound: true }
+}
+
+// ---- workflow file discovery ------------------------------------------------
+
+function collectFiles (paths) {
+  const files = new Set()
+  for (const p of paths) {
+    let st
+    try {
+      st = fs.statSync(p)
+    } catch {
+      continue
+    }
+    if (st.isDirectory()) {
+      for (const f of walk(p)) files.add(f)
+    } else if (/\.ya?ml$/i.test(p)) {
+      files.add(p)
+    }
+  }
+  return [...files]
+}
+
+function walk (dir) {
+  const out = []
+  for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, ent.name)
+    if (ent.isDirectory()) out.push(...walk(full))
+    else if (/\.ya?ml$/i.test(ent.name)) out.push(full)
+  }
+  return out
+}
+
+// ---- main -------------------------------------------------------------------
+
+async function main () {
+  const minAge = parseMinAge(getInput('min-age', '1w'))
+  const paths = getMultiline('paths')
+  const targetPaths = paths.length ? paths : ['.github/workflows']
+  const allow = getMultiline('allow')
+  const failLevel = getInput('fail-level', 'error') // error | warning
+  const includeLocal = getInput('include-local', 'false') === 'true'
+  const token = getInput('token') || process.env.GITHUB_TOKEN || ''
+  const nowMs = Date.now()
+
+  const gh = new GitHub(token)
+  const files = collectFiles(targetPaths)
+
+  const violations = []
+  let checked = 0
+
+  for (const file of files) {
+    const text = fs.readFileSync(file, 'utf8')
+    for (const { value, line } of extractUses(text)) {
+      const use = parseUsesValue(value)
+      if (use.kind !== 'remote') {
+        if (!(includeLocal && use.kind === 'local')) continue
+      }
+      if (use.kind !== 'remote') continue
+      if (!use.ref) continue
+      if (allow.some((a) => allowMatches(a, use))) continue
+
+      checked++
+
+      // branch pin is always a problem (mutable + age undefined)
+      if (!isSha(use.ref) && /^(main|master|develop|trunk)$/i.test(use.ref)) {
+        violations.push({ file, line, value, reason: 'branch pin (mutable, age undefined)' })
+        continue
+      }
+
+      let info
+      try {
+        info = await resolveAge(gh, use)
+      } catch (err) {
+        // fail-closed: an API error must not silently pass the check
+        violations.push({ file, line, value, reason: `age lookup failed: ${err.message}` })
+        continue
+      }
+
+      if (info.branch) {
+        violations.push({ file, line, value, reason: 'branch pin (mutable, age undefined)' })
+        continue
+      }
+      if (info.notFound) {
+        violations.push({ file, line, value, reason: 'ref not found (cannot determine age)' })
+        continue
+      }
+
+      const age = ageInDays(info.date, nowMs)
+      if (age < minAge) {
+        violations.push({
+          file,
+          line,
+          value,
+          age,
+          basis: info.basis,
+          note: info.note,
+          reason: `age ${age}d < min-age ${minAge}d (${info.basis})`
+        })
+      }
+    }
+  }
+
+  // report
+  for (const v of violations) {
+    const level = failLevel === 'warning' ? 'warning' : 'error'
+    annotate(level, v.file, v.line, `${v.value}: ${v.reason}`)
+  }
+
+  const rows = violations
+    .map((v) => `| \`${v.value}\` | ${v.file}:${v.line} | ${v.reason} |`)
+    .join('\n')
+  summary(
+    `## action-age-check\n\n` +
+      `min-age: **${minAge}d** / checked: **${checked}** / violations: **${violations.length}**\n\n` +
+      (violations.length
+        ? `| uses | location | reason |\n|---|---|---|\n${rows}`
+        : 'All checked actions are old enough. ✅')
+  )
+
+  setOutput('checked-count', String(checked))
+  setOutput('violation-count', String(violations.length))
+  setOutput('violations', violations)
+
+  if (violations.length && failLevel !== 'warning') {
+    console.log(`action-age-check: ${violations.length} violation(s) found`)
+    process.exitCode = 1
+  } else {
+    console.log(`action-age-check: ${violations.length} violation(s), ${checked} checked (min-age ${minAge}d)`)
+  }
+}
+
+main().catch((err) => {
+  console.log(`::error::action-age-check failed: ${err.message}`)
+  process.exitCode = 1
+})

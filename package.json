@@ -1,0 +1,15 @@
+{
+  "name": "action-age-check",
+  "version": "0.1.0",
+  "description": "Fail CI when a workflow uses a GitHub Action released too recently (supply-chain cooldown gate).",
+  "private": true,
+  "license": "MIT",
+  "author": "s4na",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}
