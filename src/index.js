@@ -98,19 +98,25 @@ async function resolveAge (gh, use) {
   const tref = await gh.get(`/repos/${owner}/${repo}/git/ref/tags/${encodeURIComponent(ref)}`)
   if (tref.status !== 404 && tref.body) {
     const obj = tref.body.object
+    // commitSha is the commit the tag ultimately points at.
+    // For a lightweight tag, obj.sha is already the commit SHA.
+    // For an annotated tag, obj.sha is the *tag object* SHA and must be
+    // dereferenced via /git/tags to reach the underlying commit SHA.
+    let commitSha = obj.sha
     if (obj.type === 'tag') {
       const tag = await gh.get(`/repos/${owner}/${repo}/git/tags/${obj.sha}`)
       if (tag.body && tag.body.tagger && tag.body.tagger.date) {
         return { date: tag.body.tagger.date, basis: 'annotated-tag' }
       }
+      if (tag.body && tag.body.object) commitSha = tag.body.object.sha
     }
-    // 3) lightweight tag -> underlying commit date (fallback)
-    const c = await gh.get(`/repos/${owner}/${repo}/commits/${obj.sha}`)
+    // 3) commit committer.date (fallback)
+    const c = await gh.get(`/repos/${owner}/${repo}/commits/${commitSha}`)
     if (c.body) {
       return {
         date: c.body.commit.committer.date,
         basis: 'commit',
-        note: 'lightweight tag; using commit date (not publish date)'
+        note: 'tag resolved to commit date (not publish date)'
       }
     }
   }
@@ -160,7 +166,6 @@ async function main () {
   const targetPaths = paths.length ? paths : ['.github/workflows']
   const allow = getMultiline('allow')
   const failLevel = getInput('fail-level', 'error') // error | warning
-  const includeLocal = getInput('include-local', 'false') === 'true'
   const token = getInput('token') || process.env.GITHUB_TOKEN || ''
   const nowMs = Date.now()
 
@@ -174,16 +179,22 @@ async function main () {
     const text = fs.readFileSync(file, 'utf8')
     for (const { value, line } of extractUses(text)) {
       const use = parseUsesValue(value)
-      if (use.kind !== 'remote') {
-        if (!(includeLocal && use.kind === 'local')) continue
-      }
+      // Only remote (owner/repo) uses have a resolvable age. Local (./) and
+      // docker:// uses are out of scope and always skipped (see README).
       if (use.kind !== 'remote') continue
-      if (!use.ref) continue
       if (allow.some((a) => allowMatches(a, use))) continue
 
       checked++
 
-      // branch pin is always a problem (mutable + age undefined)
+      // No ref at all = fully unpinned; age (and provenance) cannot be verified.
+      if (!use.ref) {
+        violations.push({ file, line, value, reason: 'unpinned (no ref; cannot determine age)' })
+        continue
+      }
+
+      // Fast path: skip the API round-trips for common default-branch pins.
+      // This is only an optimization; resolveAge() detects any branch ref via
+      // /git/ref/heads and reports it as a violation too.
       if (!isSha(use.ref) && /^(main|master|develop|trunk)$/i.test(use.ref)) {
         violations.push({ file, line, value, reason: 'branch pin (mutable, age undefined)' })
         continue
@@ -229,7 +240,7 @@ async function main () {
   }
 
   const rows = violations
-    .map((v) => `| \`${v.value}\` | ${v.file}:${v.line} | ${v.reason} |`)
+    .map((v) => `| \`${v.value}\` | \`${v.file}\`:${v.line} | ${v.reason} |`)
     .join('\n')
   summary(
     `## action-age-check\n\n` +

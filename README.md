@@ -34,6 +34,7 @@ jobs:
           fail-level: error
           allow: |
             actions/checkout
+            s4na/action-age-check   # この Action 自身が新しいうちは自己違反しないよう除外
 ```
 
 ## 入力
@@ -44,24 +45,28 @@ jobs:
 | `paths` | `.github/workflows` | 走査対象（改行区切りで複数可。ディレクトリ／ファイル両対応） |
 | `allow` | （空） | チェックを除外する `owner/repo` または `owner/repo@ref`（改行区切り） |
 | `fail-level` | `error` | `error`=job を失敗させる / `warning`=注釈のみ |
-| `include-local` | `false` | 予約。ローカル(`./`)/`docker://` の扱い（現状はスキップ） |
+| `include-local` | `false` | 予約（未実装）。ローカル(`./`)/`docker://` はこのフラグに関係なく常にスキップ |
 | `token` | `${{ github.token }}` | GitHub API 呼び出し用トークン |
 
 ## 出力
 
 | output | 説明 |
 |---|---|
-| `checked-count` | チェックしたリモート参照の数 |
-| `violation-count` | min-age 未満（または判定不能）だった数 |
+| `checked-count` | チェックしたリモート action 参照の数 |
+| `violation-count` | 違反の数（min-age 未満／アンピン／ブランチ pin／ref 不明／API エラー） |
 | `violations` | 違反の詳細（JSON 配列） |
 
-## age の判定基準（優先順）
+## age の判定基準
 
-「公開日」をできるだけ正確に取るため、次の順で基準を選びます。
+ref の種類ごとに「公開日」の取り方が異なります。
 
-1. **GitHub Release の `published_at`** — 最も信頼できる
-2. **annotated tag の `tagger.date`**
-3. **commit の `committer.date`** — フォールバック
+- **SHA pin**（`@<40桁hex>`）: commit の `committer.date` を直接使う（Release/タグは参照しない）
+- **タグ / リリース ref**（`@v1.2.3` など）: 次の優先順で「公開日」を取る
+  1. **GitHub Release の `published_at`** — 最も信頼できる
+  2. **annotated tag の `tagger.date`**
+  3. タグが指す **commit の `committer.date`** — フォールバック
+- **ブランチ pin**（`@main` など）: mutable かつ age 不定のため、常に違反扱い
+- **ref なし**（`@` を書かない完全アンピン）: age を判定できないため違反扱い
 
 ### ⚠ commit date の落とし穴
 

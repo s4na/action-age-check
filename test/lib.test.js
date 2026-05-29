@@ -45,6 +45,7 @@ test('extractUses: various forms with line numbers', () => {
     '      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2',
     '      - name: x',
     "        uses: 'docker/setup-buildx-action@v4.1.0'",
+    '      - uses: "actions/setup-node@v6.4.0"',
     '      - uses: ./local-action',
     '      - run: echo uses: not-a-real-one'
   ].join('\n')
@@ -52,7 +53,8 @@ test('extractUses: various forms with line numbers', () => {
   assert.deepEqual(got, [
     { value: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd', line: 4 },
     { value: 'docker/setup-buildx-action@v4.1.0', line: 6 },
-    { value: './local-action', line: 7 }
+    { value: 'actions/setup-node@v6.4.0', line: 7 },
+    { value: './local-action', line: 8 }
   ])
 })
 

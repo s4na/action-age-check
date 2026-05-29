@@ -23,7 +23,7 @@ inputs:
     required: false
     default: 'error'
   include-local:
-    description: 'Reserved. Include local (./) actions. Currently local/docker uses are skipped.'
+    description: 'Reserved (not yet implemented). Local (./) and docker:// uses are always skipped regardless of this flag.'
     required: false
     default: 'false'
   token:
@@ -35,7 +35,7 @@ outputs:
   checked-count:
     description: 'Number of remote action references checked.'
   violation-count:
-    description: 'Number of references younger than min-age (or otherwise failing).'
+    description: 'Number of references that failed: younger than min-age, unpinned, branch pin, ref not found, or API error.'
   violations:
     description: 'JSON array of violation objects.'
 
