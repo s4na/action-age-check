@@ -47,14 +47,19 @@ function escapeCommandMessage (msg) {
     .replace(/\n/g, '%0A')
 }
 
+function escapeCommandProperty (value) {
+  return escapeCommandMessage(value)
+    .replace(/:/g, '%3A')
+    .replace(/,/g, '%2C')
+}
+
 function debug (msg, log = console.log) {
   log(`::debug::${escapeCommandMessage(msg)}`)
 }
 
 function annotate (level, file, line, msg, log = console.log) {
-  const loc = file ? ` file=${file}${line ? `,line=${line}` : ''}` : ''
-  // newlines are not allowed in annotation messages
-  log(`::${level}${loc}::${msg.replace(/\n/g, ' ')}`)
+  const loc = file ? ` file=${escapeCommandProperty(file)}${line ? `,line=${line}` : ''}` : ''
+  log(`::${level}${loc}::${escapeCommandMessage(msg)}`)
 }
 
 // ---- GitHub REST client (native fetch) --------------------------------------
@@ -318,6 +323,7 @@ module.exports = {
   GitHub,
   collectFiles,
   escapeCommandMessage,
+  escapeCommandProperty,
   main,
   resolveAge
 }

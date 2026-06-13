@@ -285,15 +285,17 @@ test('main treats GitHub API failures as violations', async () => {
   const originalExitCode = process.exitCode
   process.exitCode = undefined
   const tmp = makeTempDir()
-  const workflowDir = path.join(tmp, '.github', 'workflows')
+  const workflowDir = path.join(tmp, 'workflow%,dir')
   fs.mkdirSync(workflowDir, { recursive: true })
+  const workflowFile = path.join(workflowDir, 'ci.yml')
   fs.writeFileSync(
-    path.join(workflowDir, 'ci.yml'),
+    workflowFile,
     ['jobs:', '  test:', '    steps:', '      - uses: octo/demo@v1'].join('\n')
   )
   const outputFile = path.join(tmp, 'output')
+  const logs = []
   const gh = fakeGh({
-    '/repos/octo/demo/releases/tags/v1': new Error('rate limited')
+    '/repos/octo/demo/releases/tags/v1': new Error('rate% limited\nagain')
   })
 
   try {
@@ -303,23 +305,27 @@ test('main treats GitHub API failures as violations', async () => {
         GITHUB_OUTPUT: outputFile
       },
       gh,
-      log: () => {},
+      log: (line) => logs.push(line),
       nowMs: Date.parse('2026-01-10T00:00:00Z')
     })
 
     assert.equal(got.checked, 1)
     assert.equal(got.exitCode, 1)
     assert.equal(got.violations.length, 1)
-    assert.match(got.violations[0].reason, /age lookup failed: rate limited/)
+    assert.match(got.violations[0].reason, /age lookup failed: rate% limited\nagain/)
     assert.equal(process.exitCode, undefined)
+    assert.ok(logs.includes(
+      `::error file=${path.join(tmp, 'workflow%25%2Cdir', 'ci.yml')},line=4::` +
+      'octo/demo@v1: age lookup failed: rate%25 limited%0Aagain'
+    ))
     const outputs = parseOutputs(fs.readFileSync(outputFile, 'utf8'))
     assert.equal(outputs['checked-count'], '1')
     assert.equal(outputs['violation-count'], '1')
     assert.deepEqual(JSON.parse(outputs.violations), [{
-      file: path.join(workflowDir, 'ci.yml'),
+      file: workflowFile,
       line: 4,
       value: 'octo/demo@v1',
-      reason: 'age lookup failed: rate limited'
+      reason: 'age lookup failed: rate% limited\nagain'
     }])
   } finally {
     process.exitCode = originalExitCode
