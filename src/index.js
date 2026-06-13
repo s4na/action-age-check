@@ -296,19 +296,22 @@ async function main (options = {}) {
 
   if (violations.length && failLevel !== 'warning') {
     log(`action-age-check: ${violations.length} violation(s) found`)
-    process.exitCode = 1
   } else {
     log(`action-age-check: ${violations.length} violation(s), ${checked} checked (min-age ${minAge}d)`)
   }
 
-  return { checked, violations, files }
+  return { checked, violations, files, exitCode: violations.length && failLevel !== 'warning' ? 1 : 0 }
 }
 
 if (require.main === module) {
-  main().catch((err) => {
-    console.log(`::error::action-age-check failed: ${escapeCommandMessage(err.message)}`)
-    process.exitCode = 1
-  })
+  main()
+    .then((result) => {
+      process.exitCode = result.exitCode
+    })
+    .catch((err) => {
+      console.log(`::error::action-age-check failed: ${escapeCommandMessage(err.message)}`)
+      process.exitCode = 1
+    })
 }
 
 module.exports = {

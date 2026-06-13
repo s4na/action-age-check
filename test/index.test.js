@@ -221,6 +221,24 @@ test('CLI reports missing scan paths as an error and exits non-zero', () => {
   assert.equal(child.stderr, '')
 })
 
+test('CLI exits non-zero when main returns violations', () => {
+  const tmp = makeTempDir()
+  const workflowFile = path.join(tmp, 'ci.yml')
+  fs.writeFileSync(
+    workflowFile,
+    ['jobs:', '  test:', '    steps:', '      - uses: octo/demo@main'].join('\n')
+  )
+  const child = spawnSync(process.execPath, [path.join(__dirname, '..', 'src', 'index.js')], {
+    cwd: path.join(__dirname, '..'),
+    encoding: 'utf8',
+    env: { INPUT_PATHS: workflowFile }
+  })
+
+  assert.equal(child.status, 1)
+  assert.match(child.stdout, /action-age-check: 1 violation\(s\) found/)
+  assert.equal(child.stderr, '')
+})
+
 test('main writes outputs and debug logs with resolved publication dates', async () => {
   const tmp = makeTempDir()
   const workflowDir = path.join(tmp, '.github', 'workflows')
@@ -252,6 +270,7 @@ test('main writes outputs and debug logs with resolved publication dates', async
   })
 
   assert.equal(got.checked, 1)
+  assert.equal(got.exitCode, 0)
   assert.equal(got.violations.length, 0)
   assert.match(logs.join('\n'), /publication date 2026-01-01T00:00:00Z/)
   assert.match(logs.join('\n'), /basis: release, age: 9d, min-age: 7d/)
@@ -289,9 +308,10 @@ test('main treats GitHub API failures as violations', async () => {
     })
 
     assert.equal(got.checked, 1)
+    assert.equal(got.exitCode, 1)
     assert.equal(got.violations.length, 1)
     assert.match(got.violations[0].reason, /age lookup failed: rate limited/)
-    assert.equal(process.exitCode, 1)
+    assert.equal(process.exitCode, undefined)
     const outputs = parseOutputs(fs.readFileSync(outputFile, 'utf8'))
     assert.equal(outputs['checked-count'], '1')
     assert.equal(outputs['violation-count'], '1')
