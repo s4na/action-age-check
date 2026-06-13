@@ -6,7 +6,7 @@ const { spawnSync } = require('node:child_process')
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
-const { main, resolveAge } = require('../src/index')
+const { main, resolveAge, resolveTagCreatedAt } = require('../src/index')
 
 function fakeGh (routes) {
   const calls = []
@@ -131,6 +131,7 @@ test('resolveAge dereferences annotated tags before commit fallback', async () =
   assert.equal(got.basis, 'commit')
   assert.deepEqual(gh.calls, [
     '/repos/octo/demo/releases/tags/v1',
+    '/repos/octo/demo/events?per_page=100&page=1',
     '/repos/octo/demo/git/ref/tags/v1',
     '/repos/octo/demo/git/tags/tag-object-sha',
     '/repos/octo/demo/commits/commit-sha'
@@ -160,6 +161,89 @@ test('resolveAge reports branch refs and missing refs as unresolved', async () =
     await resolveAge(missingGh, { owner: 'octo', repo: 'demo', ref: 'does-not-exist' }),
     { notFound: true }
   )
+})
+
+test('resolveTagCreatedAt returns server-side created_at from Events API', async () => {
+  const gh = fakeGh({
+    '/repos/octo/demo/events?per_page=100&page=1': {
+      status: 200,
+      body: [
+        { type: 'PushEvent', payload: {} },
+        { type: 'CreateEvent', payload: { ref_type: 'tag', ref: 'v2' }, created_at: '2026-05-01T12:00:00Z' }
+      ]
+    }
+  })
+
+  const got = await resolveTagCreatedAt(gh, 'octo', 'demo', 'v2')
+
+  assert.equal(got, '2026-05-01T12:00:00Z')
+})
+
+test('resolveTagCreatedAt paginates up to 3 pages', async () => {
+  const fullPage = Array.from({ length: 100 }, () => ({ type: 'PushEvent', payload: {} }))
+  const gh = fakeGh({
+    '/repos/octo/demo/events?per_page=100&page=1': { status: 200, body: fullPage },
+    '/repos/octo/demo/events?per_page=100&page=2': { status: 200, body: fullPage },
+    '/repos/octo/demo/events?per_page=100&page=3': {
+      status: 200,
+      body: [{ type: 'CreateEvent', payload: { ref_type: 'tag', ref: 'v3' }, created_at: '2026-04-01T00:00:00Z' }]
+    }
+  })
+
+  assert.equal(await resolveTagCreatedAt(gh, 'octo', 'demo', 'v3'), '2026-04-01T00:00:00Z')
+  assert.equal(gh.calls.length, 3)
+})
+
+test('resolveTagCreatedAt returns null after 3 pages without a match', async () => {
+  const fullPage = Array.from({ length: 100 }, () => ({ type: 'PushEvent', payload: {} }))
+  const gh = fakeGh({
+    '/repos/octo/demo/events?per_page=100&page=1': { status: 200, body: fullPage },
+    '/repos/octo/demo/events?per_page=100&page=2': { status: 200, body: fullPage },
+    '/repos/octo/demo/events?per_page=100&page=3': { status: 200, body: fullPage }
+  })
+
+  assert.equal(await resolveTagCreatedAt(gh, 'octo', 'demo', 'v-missing'), null)
+  assert.equal(gh.calls.length, 3)
+})
+
+test('resolveAge uses Events API created_at when release is absent', async () => {
+  const gh = fakeGh({
+    '/repos/octo/demo/releases/tags/v1': { status: 404, body: null },
+    '/repos/octo/demo/events?per_page=100&page=1': {
+      status: 200,
+      body: [
+        { type: 'PushEvent', payload: {} },
+        { type: 'CreateEvent', payload: { ref_type: 'tag', ref: 'v1' }, created_at: '2026-05-10T09:00:00Z' }
+      ]
+    }
+  })
+
+  const got = await resolveAge(gh, { owner: 'octo', repo: 'demo', ref: 'v1' })
+
+  assert.deepEqual(got, { date: '2026-05-10T09:00:00Z', basis: 'event' })
+  assert.ok(!gh.calls.some((c) => c.includes('/git/ref/tags')))
+})
+
+test('resolveAge falls back to annotated-tag when event not in Events API history', async () => {
+  const fullPage = Array.from({ length: 100 }, () => ({ type: 'PushEvent', payload: {} }))
+  const gh = fakeGh({
+    '/repos/octo/demo/releases/tags/v1': { status: 404, body: null },
+    '/repos/octo/demo/events?per_page=100&page=1': { status: 200, body: fullPage },
+    '/repos/octo/demo/events?per_page=100&page=2': { status: 200, body: fullPage },
+    '/repos/octo/demo/events?per_page=100&page=3': { status: 200, body: fullPage },
+    '/repos/octo/demo/git/ref/tags/v1': {
+      status: 200,
+      body: { object: { type: 'tag', sha: 'tag-sha' } }
+    },
+    '/repos/octo/demo/git/tags/tag-sha': {
+      status: 200,
+      body: { tagger: { date: '2025-01-01T00:00:00Z' }, object: { sha: 'commit-sha' } }
+    }
+  })
+
+  const got = await resolveAge(gh, { owner: 'octo', repo: 'demo', ref: 'v1' })
+
+  assert.deepEqual(got, { date: '2025-01-01T00:00:00Z', basis: 'annotated-tag' })
 })
 
 test('main fails when configured paths are missing or contain no workflow YAML', async () => {
