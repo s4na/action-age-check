@@ -56,6 +56,10 @@ jobs:
 | `violation-count` | 違反の数（min-age 未満／アンピン／ブランチ pin／ref 不明／API エラー） |
 | `violations` | 違反の詳細（JSON 配列） |
 
+## デバッグログ
+
+GitHub Actions の debug logging を有効にすると、検出した remote action ごとに、参照値・場所・判定に使った日付・日付の根拠（release / annotated-tag / commit）・age が `::debug::` ログに出ます。ref なし、ブランチ pin、ref 不明、API エラーなど日付を取れないケースも、その理由を debug ログに出します。
+
 ## age の判定基準
 
 ref の種類ごとに「公開日」の取り方が異なります。

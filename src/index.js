@@ -40,6 +40,17 @@ function summary (md) {
   if (f) fs.appendFileSync(f, md + '\n')
 }
 
+function escapeCommandMessage (msg) {
+  return String(msg)
+    .replace(/%/g, '%25')
+    .replace(/\r/g, '%0D')
+    .replace(/\n/g, '%0A')
+}
+
+function debug (msg) {
+  console.log(`::debug::${escapeCommandMessage(msg)}`)
+}
+
 function annotate (level, file, line, msg) {
   const loc = file ? ` file=${file}${line ? `,line=${line}` : ''}` : ''
   // newlines are not allowed in annotation messages
@@ -182,12 +193,16 @@ async function main () {
       // Only remote (owner/repo) uses have a resolvable age. Local (./) and
       // docker:// uses are out of scope and always skipped (see README).
       if (use.kind !== 'remote') continue
-      if (allow.some((a) => allowMatches(a, use))) continue
+      if (allow.some((a) => allowMatches(a, use))) {
+        debug(`detected ${value} at ${file}:${line}: skipped by allowlist`)
+        continue
+      }
 
       checked++
 
       // No ref at all = fully unpinned; age (and provenance) cannot be verified.
       if (!use.ref) {
+        debug(`detected ${value} at ${file}:${line}: no publication date (unpinned)`)
         violations.push({ file, line, value, reason: 'unpinned (no ref; cannot determine age)' })
         continue
       }
@@ -196,6 +211,7 @@ async function main () {
       // This is only an optimization; resolveAge() detects any branch ref via
       // /git/ref/heads and reports it as a violation too.
       if (!isSha(use.ref) && /^(main|master|develop|trunk)$/i.test(use.ref)) {
+        debug(`detected ${value} at ${file}:${line}: no publication date (branch pin)`)
         violations.push({ file, line, value, reason: 'branch pin (mutable, age undefined)' })
         continue
       }
@@ -205,20 +221,28 @@ async function main () {
         info = await resolveAge(gh, use)
       } catch (err) {
         // fail-closed: an API error must not silently pass the check
+        debug(`detected ${value} at ${file}:${line}: publication date lookup failed (${err.message})`)
         violations.push({ file, line, value, reason: `age lookup failed: ${err.message}` })
         continue
       }
 
       if (info.branch) {
+        debug(`detected ${value} at ${file}:${line}: no publication date (branch pin)`)
         violations.push({ file, line, value, reason: 'branch pin (mutable, age undefined)' })
         continue
       }
       if (info.notFound) {
+        debug(`detected ${value} at ${file}:${line}: no publication date (ref not found)`)
         violations.push({ file, line, value, reason: 'ref not found (cannot determine age)' })
         continue
       }
 
       const age = ageInDays(info.date, nowMs)
+      debug(
+        `detected ${value} at ${file}:${line}: publication date ${info.date} ` +
+        `(basis: ${info.basis}, age: ${age}d, min-age: ${minAge}d)` +
+        (info.note ? `; ${info.note}` : '')
+      )
       if (age < minAge) {
         violations.push({
           file,
