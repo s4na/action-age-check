@@ -306,7 +306,7 @@ async function main (options = {}) {
 
 if (require.main === module) {
   main().catch((err) => {
-    console.log(`::error::action-age-check failed: ${err.message}`)
+    console.log(`::error::action-age-check failed: ${escapeCommandMessage(err.message)}`)
     process.exitCode = 1
   })
 }

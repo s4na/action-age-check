@@ -52,6 +52,28 @@ test('resolveAge prefers GitHub release published_at for tag refs', async () => 
   })
 })
 
+test('resolveAge uses commit date for SHA refs', async () => {
+  const sha = '0123456789abcdef0123456789abcdef01234567'
+  const gh = fakeGh({
+    [`/repos/octo/demo/commits/${sha}`]: {
+      status: 200,
+      body: { commit: { committer: { date: '2026-01-04T00:00:00Z' } } }
+    }
+  })
+
+  const got = await resolveAge(gh, {
+    owner: 'octo',
+    repo: 'demo',
+    ref: sha
+  })
+
+  assert.deepEqual(got, {
+    date: '2026-01-04T00:00:00Z',
+    basis: 'commit',
+    note: 'commit date is not the publish date; vulnerable to tag re-pointing'
+  })
+})
+
 test('resolveAge uses annotated tagger date when release is absent', async () => {
   const gh = fakeGh({
     '/repos/octo/demo/releases/tags/v1': { status: 404, body: null },
@@ -155,9 +177,39 @@ test('main fails when configured paths are missing or contain no workflow YAML',
   )
 })
 
+test('main scans workflow files passed directly in paths', async () => {
+  const tmp = makeTempDir()
+  const workflowFile = path.join(tmp, 'ci.yml')
+  fs.writeFileSync(
+    workflowFile,
+    ['jobs:', '  test:', '    steps:', '      - uses: octo/demo@v1'].join('\n')
+  )
+  const gh = fakeGh({
+    '/repos/octo/demo/releases/tags/v1': {
+      status: 200,
+      body: { published_at: '2026-01-01T00:00:00Z' }
+    }
+  })
+
+  const got = await main({
+    env: {
+      'INPUT_MIN-AGE': '7d',
+      INPUT_PATHS: workflowFile
+    },
+    gh,
+    log: () => {},
+    nowMs: Date.parse('2026-01-10T00:00:00Z')
+  })
+
+  assert.equal(got.checked, 1)
+  assert.deepEqual(got.files, [workflowFile])
+  assert.equal(got.violations.length, 0)
+})
+
 test('CLI reports missing scan paths as an error and exits non-zero', () => {
   const tmp = makeTempDir()
-  const missing = path.join(tmp, 'typo')
+  const missing = path.join(tmp, 'typo%path')
+  const escapedMissing = path.join(tmp, 'typo%25path')
   const child = spawnSync(process.execPath, [path.join(__dirname, '..', 'src', 'index.js')], {
     cwd: path.join(__dirname, '..'),
     encoding: 'utf8',
@@ -165,7 +217,7 @@ test('CLI reports missing scan paths as an error and exits non-zero', () => {
   })
 
   assert.equal(child.status, 1)
-  assert.ok(child.stdout.includes(`::error::action-age-check failed: scan path not found: ${missing}`))
+  assert.ok(child.stdout.includes(`::error::action-age-check failed: scan path not found: ${escapedMissing}`))
   assert.equal(child.stderr, '')
 })
 

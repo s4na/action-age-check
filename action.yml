@@ -11,7 +11,7 @@ inputs:
     required: false
     default: '1w'
   paths:
-    description: 'Newline-separated files/directories to scan. Defaults to .github/workflows.'
+    description: 'Newline-separated files/directories to scan. Missing paths or zero collected YAML files fail the job.'
     required: false
     default: '.github/workflows'
   allow:
