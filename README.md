@@ -58,7 +58,7 @@ jobs:
 
 ## デバッグログ
 
-GitHub Actions の debug logging を有効にすると、検出した remote action ごとに、参照値・場所・判定に使った日付・日付の根拠（release / annotated-tag / commit）・age が `::debug::` ログに出ます。ref なし、ブランチ pin、ref 不明、API エラーなど日付を取れないケースも、その理由を debug ログに出します。
+GitHub Actions の debug logging を有効にすると、検出した remote action ごとに、参照値・場所・判定に使った日付・日付の根拠（release / annotated-tag / commit）・age が `::debug::` ログに出ます。ref なし、ブランチ pin、ref 不明、API エラーなど日付を取れないケースや、allowlist によるスキップも、その理由を debug ログに出します。
 
 ## age の判定基準
 
