@@ -67,7 +67,7 @@ ref の種類ごとに「公開日」の取り方が異なります。
 - **SHA pin**（`@<40桁hex>`）: commit の `committer.date` を直接使う（Release/タグは参照しない）
 - **タグ / リリース ref**（`@v1.2.3` など）: 次の優先順で「公開日」を取る
   1. **GitHub Release の `published_at`** — GitHub サーバーが記録するタイムスタンプ。最も信頼できる
-  2. **Events API の `created_at`** — タグ push 時に GitHub サーバーが記録するタイムスタンプ。コミッターによる偽装不可。**直近約 300 件 / 90 日分のみ保持**（範囲外は次の手順にフォールバック）
+  2. **Events API の `created_at`** — タグ push 時に GitHub サーバーが記録するタイムスタンプ。コミッターによる偽装不可。**直近約 300 件（低トラフィックリポジトリでは概ね 90 日相当）のみ保持**（上限を超えた場合は次の手順にフォールバック）
   3. **annotated tag の `tagger.date`** — git オブジェクト内のタイムスタンプ（Events API で見つからない場合のフォールバック）
   4. タグが指す **commit の `committer.date`** — 最終フォールバック
 - **ブランチ pin**（`@main` など）: mutable かつ age 不定のため、常に違反扱い

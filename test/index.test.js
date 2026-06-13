@@ -100,6 +100,7 @@ test('resolveAge uses annotated tagger date when release is absent', async () =>
     date: '2026-01-02T00:00:00Z',
     basis: 'annotated-tag'
   })
+  assert.ok(gh.calls.includes('/repos/octo/demo/events?per_page=100&page=1'))
   assert.ok(gh.calls.includes('/repos/octo/demo/git/tags/tag-object-sha'))
   assert.equal(gh.calls.some((call) => call.includes('/commits/')), false)
 })
@@ -157,10 +158,13 @@ test('resolveAge reports branch refs and missing refs as unresolved', async () =
     await resolveAge(branchGh, { owner: 'octo', repo: 'demo', ref: 'release/next' }),
     { branch: true }
   )
+  assert.ok(branchGh.calls.includes('/repos/octo/demo/events?per_page=100&page=1'))
+
   assert.deepEqual(
     await resolveAge(missingGh, { owner: 'octo', repo: 'demo', ref: 'does-not-exist' }),
     { notFound: true }
   )
+  assert.ok(missingGh.calls.includes('/repos/octo/demo/events?per_page=100&page=1'))
 })
 
 test('resolveTagCreatedAt returns server-side created_at from Events API', async () => {
@@ -244,6 +248,7 @@ test('resolveAge falls back to annotated-tag when event not in Events API histor
   const got = await resolveAge(gh, { owner: 'octo', repo: 'demo', ref: 'v1' })
 
   assert.deepEqual(got, { date: '2025-01-01T00:00:00Z', basis: 'annotated-tag' })
+  assert.ok(gh.calls.includes('/repos/octo/demo/events?per_page=100&page=3'))
 })
 
 test('main fails when configured paths are missing or contain no workflow YAML', async () => {
