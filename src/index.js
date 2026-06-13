@@ -13,21 +13,21 @@ const {
 
 // ---- Actions I/O helpers (no @actions/core dependency) ----------------------
 
-function getInput (name, fallback = '') {
+function getInput (name, fallback = '', env = process.env) {
   const key = `INPUT_${name.replace(/ /g, '_').toUpperCase()}`
-  const v = process.env[key]
+  const v = env[key]
   return v === undefined || v === '' ? fallback : v
 }
 
-function getMultiline (name) {
-  return getInput(name)
+function getMultiline (name, env = process.env) {
+  return getInput(name, '', env)
     .split(/\r?\n/)
     .map((s) => s.trim())
     .filter(Boolean)
 }
 
-function setOutput (name, value) {
-  const f = process.env.GITHUB_OUTPUT
+function setOutput (name, value, env = process.env) {
+  const f = env.GITHUB_OUTPUT
   if (!f) return
   const v = typeof value === 'string' ? value : JSON.stringify(value)
   // multiline-safe heredoc form
@@ -35,8 +35,8 @@ function setOutput (name, value) {
   fs.appendFileSync(f, `${name}<<${delim}\n${v}\n${delim}\n`)
 }
 
-function summary (md) {
-  const f = process.env.GITHUB_STEP_SUMMARY
+function summary (md, env = process.env) {
+  const f = env.GITHUB_STEP_SUMMARY
   if (f) fs.appendFileSync(f, md + '\n')
 }
 
@@ -47,26 +47,27 @@ function escapeCommandMessage (msg) {
     .replace(/\n/g, '%0A')
 }
 
-function debug (msg) {
-  console.log(`::debug::${escapeCommandMessage(msg)}`)
+function debug (msg, log = console.log) {
+  log(`::debug::${escapeCommandMessage(msg)}`)
 }
 
-function annotate (level, file, line, msg) {
+function annotate (level, file, line, msg, log = console.log) {
   const loc = file ? ` file=${file}${line ? `,line=${line}` : ''}` : ''
   // newlines are not allowed in annotation messages
-  console.log(`::${level}${loc}::${msg.replace(/\n/g, ' ')}`)
+  log(`::${level}${loc}::${msg.replace(/\n/g, ' ')}`)
 }
 
 // ---- GitHub REST client (native fetch) --------------------------------------
 
 class GitHub {
-  constructor (token) {
-    this.base = process.env.GITHUB_API_URL || 'https://api.github.com'
+  constructor (token, options = {}) {
+    this.base = options.base || process.env.GITHUB_API_URL || 'https://api.github.com'
     this.token = token
+    this.fetch = options.fetch || fetch
   }
 
   async get (pathname) {
-    const res = await fetch(`${this.base}${pathname}`, {
+    const res = await this.fetch(`${this.base}${pathname}`, {
       headers: {
         accept: 'application/vnd.github+json',
         'x-github-api-version': '2022-11-28',
@@ -143,11 +144,13 @@ async function resolveAge (gh, use) {
 
 function collectFiles (paths) {
   const files = new Set()
+  const missing = []
   for (const p of paths) {
     let st
     try {
       st = fs.statSync(p)
     } catch {
+      missing.push(p)
       continue
     }
     if (st.isDirectory()) {
@@ -156,7 +159,7 @@ function collectFiles (paths) {
       files.add(p)
     }
   }
-  return [...files]
+  return { files: [...files], missing }
 }
 
 function walk (dir) {
@@ -171,17 +174,28 @@ function walk (dir) {
 
 // ---- main -------------------------------------------------------------------
 
-async function main () {
-  const minAge = parseMinAge(getInput('min-age', '1w'))
-  const paths = getMultiline('paths')
+async function main (options = {}) {
+  const env = options.env || process.env
+  const log = options.log || console.log
+  const minAge = parseMinAge(getInput('min-age', '1w', env))
+  const paths = getMultiline('paths', env)
   const targetPaths = paths.length ? paths : ['.github/workflows']
-  const allow = getMultiline('allow')
-  const failLevel = getInput('fail-level', 'error') // error | warning
-  const token = getInput('token') || process.env.GITHUB_TOKEN || ''
-  const nowMs = Date.now()
+  const allow = getMultiline('allow', env)
+  const failLevel = getInput('fail-level', 'error', env) // error | warning
+  const token = getInput('token', '', env) || env.GITHUB_TOKEN || ''
+  const nowMs = options.nowMs || Date.now()
 
-  const gh = new GitHub(token)
-  const files = collectFiles(targetPaths)
+  const gh = options.gh || new GitHub(token, {
+    base: env.GITHUB_API_URL || 'https://api.github.com',
+    fetch: options.fetch
+  })
+  const { files, missing } = collectFiles(targetPaths)
+  if (missing.length) {
+    throw new Error(`scan path not found: ${missing.join(', ')}`)
+  }
+  if (!files.length) {
+    throw new Error(`no workflow YAML files found in paths: ${targetPaths.join(', ')}`)
+  }
 
   const violations = []
   let checked = 0
@@ -194,7 +208,7 @@ async function main () {
       // docker:// uses are out of scope and always skipped (see README).
       if (use.kind !== 'remote') continue
       if (allow.some((a) => allowMatches(a, use))) {
-        debug(`detected ${value} at ${file}:${line}: skipped by allowlist`)
+        debug(`detected ${value} at ${file}:${line}: skipped by allowlist`, log)
         continue
       }
 
@@ -202,7 +216,7 @@ async function main () {
 
       // No ref at all = fully unpinned; age (and provenance) cannot be verified.
       if (!use.ref) {
-        debug(`detected ${value} at ${file}:${line}: no publication date (unpinned)`)
+        debug(`detected ${value} at ${file}:${line}: no publication date (unpinned)`, log)
         violations.push({ file, line, value, reason: 'unpinned (no ref; cannot determine age)' })
         continue
       }
@@ -211,7 +225,7 @@ async function main () {
       // This is only an optimization; resolveAge() detects any branch ref via
       // /git/ref/heads and reports it as a violation too.
       if (!isSha(use.ref) && /^(main|master|develop|trunk)$/i.test(use.ref)) {
-        debug(`detected ${value} at ${file}:${line}: no publication date (branch pin)`)
+        debug(`detected ${value} at ${file}:${line}: no publication date (branch pin)`, log)
         violations.push({ file, line, value, reason: 'branch pin (mutable, age undefined)' })
         continue
       }
@@ -221,18 +235,18 @@ async function main () {
         info = await resolveAge(gh, use)
       } catch (err) {
         // fail-closed: an API error must not silently pass the check
-        debug(`detected ${value} at ${file}:${line}: publication date lookup failed (${err.message})`)
+        debug(`detected ${value} at ${file}:${line}: publication date lookup failed (${err.message})`, log)
         violations.push({ file, line, value, reason: `age lookup failed: ${err.message}` })
         continue
       }
 
       if (info.branch) {
-        debug(`detected ${value} at ${file}:${line}: no publication date (branch pin)`)
+        debug(`detected ${value} at ${file}:${line}: no publication date (branch pin)`, log)
         violations.push({ file, line, value, reason: 'branch pin (mutable, age undefined)' })
         continue
       }
       if (info.notFound) {
-        debug(`detected ${value} at ${file}:${line}: no publication date (ref not found)`)
+        debug(`detected ${value} at ${file}:${line}: no publication date (ref not found)`, log)
         violations.push({ file, line, value, reason: 'ref not found (cannot determine age)' })
         continue
       }
@@ -241,7 +255,8 @@ async function main () {
       debug(
         `detected ${value} at ${file}:${line}: publication date ${info.date} ` +
         `(basis: ${info.basis}, age: ${age}d, min-age: ${minAge}d)` +
-        (info.note ? `; ${info.note}` : '')
+        (info.note ? `; ${info.note}` : ''),
+        log
       )
       if (age < minAge) {
         violations.push({
@@ -260,7 +275,7 @@ async function main () {
   // report
   for (const v of violations) {
     const level = failLevel === 'warning' ? 'warning' : 'error'
-    annotate(level, v.file, v.line, `${v.value}: ${v.reason}`)
+    annotate(level, v.file, v.line, `${v.value}: ${v.reason}`, log)
   }
 
   const rows = violations
@@ -271,22 +286,35 @@ async function main () {
       `min-age: **${minAge}d** / checked: **${checked}** / violations: **${violations.length}**\n\n` +
       (violations.length
         ? `| uses | location | reason |\n|---|---|---|\n${rows}`
-        : 'All checked actions are old enough. ✅')
+        : 'All checked actions are old enough. ✅'),
+    env
   )
 
-  setOutput('checked-count', String(checked))
-  setOutput('violation-count', String(violations.length))
-  setOutput('violations', violations)
+  setOutput('checked-count', String(checked), env)
+  setOutput('violation-count', String(violations.length), env)
+  setOutput('violations', violations, env)
 
   if (violations.length && failLevel !== 'warning') {
-    console.log(`action-age-check: ${violations.length} violation(s) found`)
+    log(`action-age-check: ${violations.length} violation(s) found`)
     process.exitCode = 1
   } else {
-    console.log(`action-age-check: ${violations.length} violation(s), ${checked} checked (min-age ${minAge}d)`)
+    log(`action-age-check: ${violations.length} violation(s), ${checked} checked (min-age ${minAge}d)`)
   }
+
+  return { checked, violations, files }
 }
 
-main().catch((err) => {
-  console.log(`::error::action-age-check failed: ${err.message}`)
-  process.exitCode = 1
-})
+if (require.main === module) {
+  main().catch((err) => {
+    console.log(`::error::action-age-check failed: ${err.message}`)
+    process.exitCode = 1
+  })
+}
+
+module.exports = {
+  GitHub,
+  collectFiles,
+  escapeCommandMessage,
+  main,
+  resolveAge
+}

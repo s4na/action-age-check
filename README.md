@@ -42,7 +42,7 @@ jobs:
 | input | デフォルト | 説明 |
 |---|---|---|
 | `min-age` | `1w` | 最低経過時間。`1d`, `2d`, `7d`, `1w`, `2w` など。単位なしの整数は日。`w`=週。不正値はエラーで fail |
-| `paths` | `.github/workflows` | 走査対象（改行区切りで複数可。ディレクトリ／ファイル両対応） |
+| `paths` | `.github/workflows` | 走査対象（改行区切りで複数可。ディレクトリ／ファイル両対応）。指定 path が存在しない、または YAML が 1 件も見つからない場合は fail |
 | `allow` | （空） | チェックを除外する `owner/repo` または `owner/repo@ref`（改行区切り） |
 | `fail-level` | `error` | `error`=job を失敗させる / `warning`=注釈のみ |
 | `include-local` | `false` | 予約（未実装）。ローカル(`./`)/`docker://` はこのフラグに関係なく常にスキップ |
