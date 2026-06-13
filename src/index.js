@@ -128,7 +128,7 @@ async function resolveAge (gh, use) {
   }
 
   // 2) Events API created_at — server-side timestamp, cannot be forged by the committer.
-  //    Limited to ~300 events / 90 days; falls through to git-object dates when not found.
+  //    Limited to ~300 events (roughly 90 days for low-traffic repos); falls through to git-object dates when not found.
   const eventDate = await resolveTagCreatedAt(gh, owner, repo, ref)
   if (eventDate) {
     return { date: eventDate, basis: 'event' }
