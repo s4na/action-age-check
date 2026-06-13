@@ -1,0 +1,44 @@
+name: 'action-age-check'
+description: 'Fail CI when a workflow uses a GitHub Action that was released too recently (supply-chain cooldown gate).'
+author: 's4na'
+branding:
+  icon: 'clock'
+  color: 'orange'
+
+inputs:
+  min-age:
+    description: 'Minimum age of each used action. e.g. 1d, 2d, 7d, 1w, 2w. A bare number is treated as days.'
+    required: false
+    default: '1w'
+  paths:
+    description: 'Newline-separated files/directories to scan. Missing paths or zero collected YAML files fail the job.'
+    required: false
+    default: '.github/workflows'
+  allow:
+    description: 'Newline-separated allowlist (owner/repo or owner/repo@ref) to exclude from the age check.'
+    required: false
+    default: ''
+  fail-level:
+    description: '"error" fails the job; "warning" only annotates.'
+    required: false
+    default: 'error'
+  include-local:
+    description: 'Reserved (not yet implemented). Local (./) and docker:// uses are always skipped regardless of this flag.'
+    required: false
+    default: 'false'
+  token:
+    description: 'Token for GitHub API calls (rate limit / private resolution).'
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  checked-count:
+    description: 'Number of remote action references checked.'
+  violation-count:
+    description: 'Number of references that failed: younger than min-age, unpinned, branch pin, ref not found, or API error.'
+  violations:
+    description: 'JSON array of violation objects.'
+
+runs:
+  using: 'node24'
+  main: 'src/index.js'
