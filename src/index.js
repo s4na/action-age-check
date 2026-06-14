@@ -90,6 +90,22 @@ class GitHub {
 
 // ---- age resolution ---------------------------------------------------------
 
+// Search the Events API for the server-side timestamp of a tag creation.
+// The Events API retains up to 300 events (~90 days); returns null when not found.
+async function resolveTagCreatedAt (gh, owner, repo, ref) {
+  for (let page = 1; page <= 3; page++) {
+    const r = await gh.get(`/repos/${owner}/${repo}/events?per_page=100&page=${page}`)
+    if (r.status === 404 || !Array.isArray(r.body) || r.body.length === 0) return null
+    for (const ev of r.body) {
+      if (ev.type === 'CreateEvent' && ev.payload?.ref_type === 'tag' && ev.payload?.ref === ref) {
+        return ev.created_at
+      }
+    }
+    if (r.body.length < 100) break
+  }
+  return null
+}
+
 // Resolve the "publication date" of a remote use, preferring trustworthy bases.
 // Returns { date, basis, note? } | { branch:true } | { notFound:true }
 async function resolveAge (gh, use) {
@@ -111,7 +127,14 @@ async function resolveAge (gh, use) {
     return { date: rel.body.published_at, basis: 'release' }
   }
 
-  // 2) Annotated tag tagger.date
+  // 2) Events API created_at — server-side timestamp, cannot be forged by the committer.
+  //    Limited to ~300 events (roughly 90 days for low-traffic repos); falls through to git-object dates when not found.
+  const eventDate = await resolveTagCreatedAt(gh, owner, repo, ref)
+  if (eventDate) {
+    return { date: eventDate, basis: 'event' }
+  }
+
+  // 3) Annotated tag tagger.date (fallback when event not in history)
   const tref = await gh.get(`/repos/${owner}/${repo}/git/ref/tags/${encodeURIComponent(ref)}`)
   if (tref.status !== 404 && tref.body) {
     const obj = tref.body.object
@@ -127,7 +150,7 @@ async function resolveAge (gh, use) {
       }
       if (tag.body && tag.body.object) commitSha = tag.body.object.sha
     }
-    // 3) commit committer.date (fallback)
+    // 4) commit committer.date (fallback)
     const c = await gh.get(`/repos/${owner}/${repo}/commits/${commitSha}`)
     if (c.body) {
       return {
@@ -325,5 +348,6 @@ module.exports = {
   escapeCommandMessage,
   escapeCommandProperty,
   main,
-  resolveAge
+  resolveAge,
+  resolveTagCreatedAt
 }

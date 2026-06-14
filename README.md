@@ -58,7 +58,7 @@ jobs:
 
 ## デバッグログ
 
-GitHub Actions の debug logging を有効にすると、検出した remote action ごとに、参照値・場所・判定に使った日付・日付の根拠（release / annotated-tag / commit）・age が `::debug::` ログに出ます。ref なし、ブランチ pin、ref 不明、API エラーなど日付を取れないケースや、allowlist によるスキップも、その理由を debug ログに出します。
+GitHub Actions の debug logging を有効にすると、検出した remote action ごとに、参照値・場所・判定に使った日付・日付の根拠（release / event / annotated-tag / commit）・age が `::debug::` ログに出ます。ref なし、ブランチ pin、ref 不明、API エラーなど日付を取れないケースや、allowlist によるスキップも、その理由を debug ログに出します。
 
 ## age の判定基準
 
@@ -66,15 +66,16 @@ ref の種類ごとに「公開日」の取り方が異なります。
 
 - **SHA pin**（`@<40桁hex>`）: commit の `committer.date` を直接使う（Release/タグは参照しない）
 - **タグ / リリース ref**（`@v1.2.3` など）: 次の優先順で「公開日」を取る
-  1. **GitHub Release の `published_at`** — 最も信頼できる
-  2. **annotated tag の `tagger.date`**
-  3. タグが指す **commit の `committer.date`** — フォールバック
+  1. **GitHub Release の `published_at`** — GitHub サーバーが記録するタイムスタンプ。最も信頼できる
+  2. **Events API の `created_at`** — タグ push 時に GitHub サーバーが記録するタイムスタンプ。コミッターによる偽装不可。**直近約 300 件（低トラフィックリポジトリでは概ね 90 日相当）のみ保持**（上限を超えた場合は次の手順にフォールバック）
+  3. **annotated tag の `tagger.date`** — git オブジェクト内のタイムスタンプ（Events API で見つからない場合のフォールバック）
+  4. タグが指す **commit の `committer.date`** — 最終フォールバック
 - **ブランチ pin**（`@main` など）: mutable かつ age 不定のため、常に違反扱い
 - **ref なし**（`@` を書かない完全アンピン）: age を判定できないため違反扱い
 
-### ⚠ commit date の落とし穴
+### ⚠ git オブジェクト日時の落とし穴
 
-commit の日時は「その commit が作られた日」であって「公開日」ではありません。攻撃者が**古い commit に新しくタグを付け替える**と、commit date が古いため age チェックを素通りする可能性があります（tag 付け替え型攻撃）。SHA pin や cooldown と**併用**することを前提とした、多層防御の一層として使ってください。
+annotated tag の `tagger.date` や commit の `committer.date` はクライアント側で自由に設定できます。Events API（優先度 2）で日時を取れた場合はサーバー側タイムスタンプを使うため偽装できませんが、直近 300 件を超えたイベント（低トラフィックリポジトリでは概ね 90 日より古いタグ）は git オブジェクト日時にフォールバックします。SHA pin や cooldown と**併用**することを前提とした、多層防御の一層として使ってください。
 
 ## 設計上の方針
 
