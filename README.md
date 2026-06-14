@@ -1,15 +1,28 @@
 # action-age-check
 
-ワークフローで `uses:` している GitHub Actions が「リリースから十分に時間が経過した（枯れた）バージョンか」を検証し、まだ新しすぎるものを検出して CI を失敗させる Action です。
+ワークフローで使っている GitHub Actions がリリースされたばかりでないかを CI でチェックする Action です。
+
+デフォルトでは「リリースから1週間以上経過しているか」を検証し、新しすぎるものがあれば CI を失敗させます。
 
 ## なぜ必要か
 
-サプライチェーン攻撃は、悪意あるリリースやタグ付け替えが行われた**直後**が最も危険です。Dependabot の `cooldown` や Renovate の `minimumReleaseAge` は「既存依存の**更新**」フローにしか効かず、次のケースは素通りします。
+サプライチェーン攻撃は、悪意あるリリースやタグ付け替えが行われた直後が最も危険です。Dependabot の `cooldown` や Renovate の `minimumReleaseAge` は「既存依存の更新」フローにしか効かず、次のケースは素通りします。
 
 - 開発者が新規ワークフローを書くときに、最新版を手で貼り付ける
 - 既存の `uses:` を手作業で最新版に書き換える
 
-この Action は、CI 上で「使われている action が十分に枯れているか」を直接ゲートする、**最終防衛線（pull 型のチェック）** を提供します。
+この Action は、CI 上で「使われている action が十分に枯れているか」を直接ゲートする、最終防衛線（pull 型のチェック）を提供します。
+
+## 動作イメージ
+
+PR に新しい Action を追加したとき、リリースから1週間経っていなければ CI がこのように失敗します：
+
+```
+✗ actions/setup-node@v4.2.0
+  released 2025-06-10 (3 days ago) — minimum age is 7 days
+```
+
+もし特定の Action をチェック対象から外したい場合は `allow:` に追記してください。待ちたい場合は、1週間後に再度 PR を更新すれば通過します。
 
 ## 使い方
 
@@ -64,22 +77,22 @@ GitHub Actions の debug logging を有効にすると、検出した remote act
 
 ref の種類ごとに「公開日」の取り方が異なります。
 
-- **SHA pin**（`@<40桁hex>`）: commit の `committer.date` を直接使う（Release/タグは参照しない）
-- **タグ / リリース ref**（`@v1.2.3` など）: 次の優先順で「公開日」を取る
-  1. **GitHub Release の `published_at`** — GitHub サーバーが記録するタイムスタンプ。最も信頼できる
-  2. **Events API の `created_at`** — タグ push 時に GitHub サーバーが記録するタイムスタンプ。コミッターによる偽装不可。**直近約 300 件（低トラフィックリポジトリでは概ね 90 日相当）のみ保持**（上限を超えた場合は次の手順にフォールバック）
-  3. **annotated tag の `tagger.date`** — git オブジェクト内のタイムスタンプ（Events API で見つからない場合のフォールバック）
-  4. タグが指す **commit の `committer.date`** — 最終フォールバック
-- **ブランチ pin**（`@main` など）: mutable かつ age 不定のため、常に違反扱い
-- **ref なし**（`@` を書かない完全アンピン）: age を判定できないため違反扱い
+- SHA pin（`@<40桁hex>`）: commit の `committer.date` を直接使う（Release/タグは参照しない）
+- タグ / リリース ref（`@v1.2.3` など）: 次の優先順で「公開日」を取る
+  1. GitHub Release の `published_at` — GitHub サーバーが記録するタイムスタンプ。最も信頼できる
+  2. Events API の `created_at` — タグ push 時に GitHub サーバーが記録するタイムスタンプ。コミッターによる偽装不可。直近約 300 件（低トラフィックリポジトリでは概ね 90 日相当）のみ保持（上限を超えた場合は次の手順にフォールバック）
+  3. annotated tag の `tagger.date` — git オブジェクト内のタイムスタンプ（Events API で見つからない場合のフォールバック）
+  4. タグが指す commit の `committer.date` — 最終フォールバック
+- ブランチ pin（`@main` など）: mutable かつ age 不定のため、常に違反扱い
+- ref なし（`@` を書かない完全アンピン）: age を判定できないため違反扱い
 
 ### ⚠ git オブジェクト日時の落とし穴
 
-annotated tag の `tagger.date` や commit の `committer.date` はクライアント側で自由に設定できます。Events API（優先度 2）で日時を取れた場合はサーバー側タイムスタンプを使うため偽装できませんが、直近 300 件を超えたイベント（低トラフィックリポジトリでは概ね 90 日より古いタグ）は git オブジェクト日時にフォールバックします。SHA pin や cooldown と**併用**することを前提とした、多層防御の一層として使ってください。
+annotated tag の `tagger.date` や commit の `committer.date` はクライアント側で自由に設定できます。Events API（優先度 2）で日時を取れた場合はサーバー側タイムスタンプを使うため偽装できませんが、直近 300 件を超えたイベント（低トラフィックリポジトリでは概ね 90 日より古いタグ）は git オブジェクト日時にフォールバックします。SHA pin や cooldown と併用することを前提とした、多層防御の一層として使ってください。
 
 ## 設計上の方針
 
-- **fail-closed**: API エラーなどで age を判定できない場合は、黙って pass せず違反として扱います（安全側に倒す）。
+- fail-closed: API エラーなどで age を判定できない場合は、黙って pass せず違反として扱います（安全側に倒す）。
 - ブランチ pin（`@main` など）は mutable かつ age 不定のため、常に違反扱いです。
 - 依存ゼロの Node 24 action（`runs.using: node24`）。ビルド成果物（dist）のコミットは不要です。
 
