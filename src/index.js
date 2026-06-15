@@ -226,77 +226,80 @@ async function main (options = {}) {
   }
 
   const violations = []
-  let checked = 0
+  const pending = []
 
   for (const file of files) {
     const text = fs.readFileSync(file, 'utf8')
     for (const { value, line } of extractUses(text)) {
       const use = parseUsesValue(value)
-      // Only remote (owner/repo) uses have a resolvable age. Local (./) and
-      // docker:// uses are out of scope and always skipped (see README).
       if (use.kind !== 'remote') continue
       if (allow.some((a) => allowMatches(a, use))) {
         debug(`detected ${value} at ${file}:${line}: skipped by allowlist`, log)
         continue
       }
 
-      checked++
-
-      // No ref at all = fully unpinned; age (and provenance) cannot be verified.
       if (!use.ref) {
         debug(`detected ${value} at ${file}:${line}: no publication date (unpinned)`, log)
         violations.push({ file, line, value, reason: 'unpinned (no ref; cannot determine age)' })
         continue
       }
 
-      // Fast path: skip the API round-trips for common default-branch pins.
-      // This is only an optimization; resolveAge() detects any branch ref via
-      // /git/ref/heads and reports it as a violation too.
       if (!isSha(use.ref) && /^(main|master|develop|trunk)$/i.test(use.ref)) {
         debug(`detected ${value} at ${file}:${line}: no publication date (branch pin)`, log)
         violations.push({ file, line, value, reason: 'branch pin (mutable, age undefined)' })
         continue
       }
 
-      let info
-      try {
-        info = await resolveAge(gh, use)
-      } catch (err) {
-        // fail-closed: an API error must not silently pass the check
-        debug(`detected ${value} at ${file}:${line}: publication date lookup failed (${err.message})`, log)
-        violations.push({ file, line, value, reason: `age lookup failed: ${err.message}` })
-        continue
-      }
+      pending.push({ file, line, value, use })
+    }
+  }
 
-      if (info.branch) {
-        debug(`detected ${value} at ${file}:${line}: no publication date (branch pin)`, log)
-        violations.push({ file, line, value, reason: 'branch pin (mutable, age undefined)' })
-        continue
-      }
-      if (info.notFound) {
-        debug(`detected ${value} at ${file}:${line}: no publication date (ref not found)`, log)
-        violations.push({ file, line, value, reason: 'ref not found (cannot determine age)' })
-        continue
-      }
+  const checked = violations.length + pending.length
 
-      const age = ageInDays(info.date, nowMs)
-      debug(
-        `detected ${value} at ${file}:${line}: publication date ${info.date} ` +
-        `(basis: ${info.basis}, age: ${age}d, min-age: ${minAge}d)` +
-        (info.note ? `; ${info.note}` : ''),
-        log
-      )
-      if (age < minAge) {
-        violations.push({
-          file,
-          line,
-          value,
-          age,
-          basis: info.basis,
-          note: info.note,
-          reason: `age ${age}d < min-age ${minAge}d (${info.basis})`
-        })
-      }
+  const settled = await Promise.allSettled(
+    pending.map((entry) => resolveAge(gh, entry.use).then((info) => ({ entry, info })))
+  )
+
+  for (let i = 0; i < settled.length; i++) {
+    const result = settled[i]
+    if (result.status === 'rejected') {
+      const err = result.reason
+      const entry = pending[i]
+      debug(`detected ${entry.value} at ${entry.file}:${entry.line}: publication date lookup failed (${err.message})`, log)
+      violations.push({ file: entry.file, line: entry.line, value: entry.value, reason: `age lookup failed: ${err.message}` })
+      continue
+    }
+
+    const { entry, info } = result.value
+
+    if (info.branch) {
+      debug(`detected ${entry.value} at ${entry.file}:${entry.line}: no publication date (branch pin)`, log)
+      violations.push({ file: entry.file, line: entry.line, value: entry.value, reason: 'branch pin (mutable, age undefined)' })
+      continue
+    }
+    if (info.notFound) {
+      debug(`detected ${entry.value} at ${entry.file}:${entry.line}: no publication date (ref not found)`, log)
+      violations.push({ file: entry.file, line: entry.line, value: entry.value, reason: 'ref not found (cannot determine age)' })
+      continue
+    }
+
+    const age = ageInDays(info.date, nowMs)
+    debug(
+      `detected ${entry.value} at ${entry.file}:${entry.line}: publication date ${info.date} ` +
+      `(basis: ${info.basis}, age: ${age}d, min-age: ${minAge}d)` +
+      (info.note ? `; ${info.note}` : ''),
+      log
+    )
+    if (age < minAge) {
+      violations.push({
+        file: entry.file,
+        line: entry.line,
+        value: entry.value,
+        age,
+        basis: info.basis,
+        note: info.note,
+        reason: `age ${age}d < min-age ${minAge}d (${info.basis})`
+      })
     }
   }
 
