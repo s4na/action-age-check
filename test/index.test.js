@@ -370,6 +370,50 @@ test('main writes outputs and debug logs with resolved publication dates', async
   assert.match(fs.readFileSync(summaryFile, 'utf8'), /All checked actions are old enough/)
 })
 
+test('main resolves multiple actions in parallel and isolates partial failures', async () => {
+  const tmp = makeTempDir()
+  const workflowFile = path.join(tmp, 'ci.yml')
+  fs.writeFileSync(
+    workflowFile,
+    [
+      'jobs:',
+      '  test:',
+      '    steps:',
+      '      - uses: octo/good@v1',
+      '      - uses: octo/bad@v2',
+      '      - uses: octo/old@v3'
+    ].join('\n')
+  )
+  const gh = fakeGh({
+    '/repos/octo/good/releases/tags/v1': {
+      status: 200,
+      body: { published_at: '2026-01-01T00:00:00Z' }
+    },
+    '/repos/octo/bad/releases/tags/v2': new Error('rate limited'),
+    '/repos/octo/old/releases/tags/v3': {
+      status: 200,
+      body: { published_at: '2026-01-08T00:00:00Z' }
+    }
+  })
+
+  const got = await main({
+    env: {
+      'INPUT_MIN-AGE': '7d',
+      INPUT_PATHS: workflowFile
+    },
+    gh,
+    log: () => {},
+    nowMs: Date.parse('2026-01-10T00:00:00Z')
+  })
+
+  assert.equal(got.checked, 3)
+  assert.equal(got.violations.length, 2)
+  const reasons = got.violations.map((v) => v.value)
+  assert.ok(reasons.includes('octo/bad@v2'), 'API failure should be a violation')
+  assert.ok(reasons.includes('octo/old@v3'), 'too-young action should be a violation')
+  assert.ok(!reasons.includes('octo/good@v1'), 'old-enough action should pass')
+})
+
 test('main treats GitHub API failures as violations', async () => {
   const originalExitCode = process.exitCode
   process.exitCode = undefined
