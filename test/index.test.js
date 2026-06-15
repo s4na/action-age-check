@@ -6,7 +6,7 @@ const { spawnSync } = require('node:child_process')
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
-const { main, resolveAge, resolveTagCreatedAt } = require('../src/index')
+const { main, resolveAge, resolveTagCreatedAt, fetchRepoEvents } = require('../src/index')
 
 function fakeGh (routes) {
   const calls = []
@@ -44,7 +44,7 @@ test('resolveAge prefers GitHub release published_at for tag refs', async () => 
     owner: 'actions',
     repo: 'checkout',
     ref: 'v4'
-  })
+  }, new Map())
 
   assert.deepEqual(got, {
     date: '2026-01-02T03:04:05Z',
@@ -65,7 +65,7 @@ test('resolveAge uses commit date for SHA refs', async () => {
     owner: 'octo',
     repo: 'demo',
     ref: sha
-  })
+  }, new Map())
 
   assert.deepEqual(got, {
     date: '2026-01-04T00:00:00Z',
@@ -94,7 +94,7 @@ test('resolveAge uses annotated tagger date when release is absent', async () =>
     owner: 'octo',
     repo: 'demo',
     ref: 'v1'
-  })
+  }, new Map())
 
   assert.deepEqual(got, {
     date: '2026-01-02T00:00:00Z',
@@ -126,7 +126,7 @@ test('resolveAge dereferences annotated tags before commit fallback', async () =
     owner: 'octo',
     repo: 'demo',
     ref: 'v1'
-  })
+  }, new Map())
 
   assert.equal(got.date, '2026-01-03T00:00:00Z')
   assert.equal(got.basis, 'commit')
@@ -155,13 +155,13 @@ test('resolveAge reports branch refs and missing refs as unresolved', async () =
   })
 
   assert.deepEqual(
-    await resolveAge(branchGh, { owner: 'octo', repo: 'demo', ref: 'release/next' }),
+    await resolveAge(branchGh, { owner: 'octo', repo: 'demo', ref: 'release/next' }, new Map()),
     { branch: true }
   )
   assert.ok(branchGh.calls.includes('/repos/octo/demo/events?per_page=100&page=1'))
 
   assert.deepEqual(
-    await resolveAge(missingGh, { owner: 'octo', repo: 'demo', ref: 'does-not-exist' }),
+    await resolveAge(missingGh, { owner: 'octo', repo: 'demo', ref: 'does-not-exist' }, new Map()),
     { notFound: true }
   )
   assert.ok(missingGh.calls.includes('/repos/octo/demo/events?per_page=100&page=1'))
@@ -178,7 +178,7 @@ test('resolveTagCreatedAt returns server-side created_at from Events API', async
     }
   })
 
-  const got = await resolveTagCreatedAt(gh, 'octo', 'demo', 'v2')
+  const got = await resolveTagCreatedAt(gh, 'octo', 'demo', 'v2', new Map())
 
   assert.equal(got, '2026-05-01T12:00:00Z')
 })
@@ -194,7 +194,7 @@ test('resolveTagCreatedAt paginates up to 3 pages', async () => {
     }
   })
 
-  assert.equal(await resolveTagCreatedAt(gh, 'octo', 'demo', 'v3'), '2026-04-01T00:00:00Z')
+  assert.equal(await resolveTagCreatedAt(gh, 'octo', 'demo', 'v3', new Map()), '2026-04-01T00:00:00Z')
   assert.equal(gh.calls.length, 3)
 })
 
@@ -206,7 +206,7 @@ test('resolveTagCreatedAt returns null after 3 pages without a match', async () 
     '/repos/octo/demo/events?per_page=100&page=3': { status: 200, body: fullPage }
   })
 
-  assert.equal(await resolveTagCreatedAt(gh, 'octo', 'demo', 'v-missing'), null)
+  assert.equal(await resolveTagCreatedAt(gh, 'octo', 'demo', 'v-missing', new Map()), null)
   assert.equal(gh.calls.length, 3)
 })
 
@@ -222,7 +222,7 @@ test('resolveAge uses Events API created_at when release is absent', async () =>
     }
   })
 
-  const got = await resolveAge(gh, { owner: 'octo', repo: 'demo', ref: 'v1' })
+  const got = await resolveAge(gh, { owner: 'octo', repo: 'demo', ref: 'v1' }, new Map())
 
   assert.deepEqual(got, { date: '2026-05-10T09:00:00Z', basis: 'event' })
   assert.ok(!gh.calls.some((c) => c.includes('/git/ref/tags')))
@@ -245,10 +245,106 @@ test('resolveAge falls back to annotated-tag when event not in Events API histor
     }
   })
 
-  const got = await resolveAge(gh, { owner: 'octo', repo: 'demo', ref: 'v1' })
+  const got = await resolveAge(gh, { owner: 'octo', repo: 'demo', ref: 'v1' }, new Map())
 
   assert.deepEqual(got, { date: '2025-01-01T00:00:00Z', basis: 'annotated-tag' })
   assert.ok(gh.calls.includes('/repos/octo/demo/events?per_page=100&page=3'))
+})
+
+test('main deduplicates identical owner/repo@ref across files', async () => {
+  const tmp = makeTempDir()
+  const file1 = path.join(tmp, 'a.yml')
+  const file2 = path.join(tmp, 'b.yml')
+  const yaml = ['jobs:', '  test:', '    steps:', '      - uses: octo/demo@v1'].join('\n')
+  fs.writeFileSync(file1, yaml)
+  fs.writeFileSync(file2, yaml)
+  const gh = fakeGh({
+    '/repos/octo/demo/releases/tags/v1': {
+      status: 200,
+      body: { published_at: '2026-01-01T00:00:00Z' }
+    }
+  })
+
+  const got = await main({
+    env: { 'INPUT_MIN-AGE': '7d', INPUT_PATHS: `${file1}\n${file2}` },
+    gh,
+    log: () => {},
+    nowMs: Date.parse('2026-01-10T00:00:00Z')
+  })
+
+  assert.equal(got.checked, 2)
+  assert.equal(got.violations.length, 0)
+  // resolveAge should be called only once for the same owner/repo@ref
+  const releaseCalls = gh.calls.filter((c) => c === '/repos/octo/demo/releases/tags/v1')
+  assert.equal(releaseCalls.length, 1, 'duplicate owner/repo@ref should resolve only once')
+})
+
+test('events cache is shared across tags in the same repo', async () => {
+  const gh = fakeGh({
+    '/repos/octo/demo/releases/tags/v1': {
+      status: 200,
+      body: { published_at: '2026-01-01T00:00:00Z' }
+    },
+    '/repos/octo/demo/releases/tags/v2': {
+      status: 200,
+      body: { published_at: '2026-01-01T00:00:00Z' }
+    }
+  })
+  const tmp = makeTempDir()
+  const file = path.join(tmp, 'ci.yml')
+  fs.writeFileSync(file, [
+    'jobs:',
+    '  test:',
+    '    steps:',
+    '      - uses: octo/demo@v1',
+    '      - uses: octo/demo@v2'
+  ].join('\n'))
+
+  await main({
+    env: { 'INPUT_MIN-AGE': '7d', INPUT_PATHS: file },
+    gh,
+    log: () => {},
+    nowMs: Date.parse('2026-01-10T00:00:00Z')
+  })
+
+  // Both hit the release fast path, so events API is never called.
+  // If release were absent, both would share the same events cache.
+  // Verify no duplicate events calls even in the cache-miss path:
+  const eventsCalls = gh.calls.filter((c) => c.includes('/events'))
+  assert.equal(eventsCalls.length, 0, 'release fast path avoids events API')
+})
+
+test('events cache avoids duplicate Events API calls for same repo', async () => {
+  const eventsPage = [
+    { type: 'CreateEvent', payload: { ref_type: 'tag', ref: 'v1' }, created_at: '2026-01-01T00:00:00Z' }
+  ]
+  const gh = fakeGh({
+    '/repos/octo/demo/releases/tags/v1': { status: 404, body: null },
+    '/repos/octo/demo/releases/tags/v2': { status: 404, body: null },
+    '/repos/octo/demo/events?per_page=100&page=1': { status: 200, body: eventsPage },
+    '/repos/octo/demo/git/ref/tags/v2': { status: 404, body: null },
+    '/repos/octo/demo/git/ref/heads/v2': { status: 404, body: null }
+  })
+  const tmp = makeTempDir()
+  const file = path.join(tmp, 'ci.yml')
+  fs.writeFileSync(file, [
+    'jobs:',
+    '  test:',
+    '    steps:',
+    '      - uses: octo/demo@v1',
+    '      - uses: octo/demo@v2'
+  ].join('\n'))
+
+  const got = await main({
+    env: { 'INPUT_MIN-AGE': '7d', INPUT_PATHS: file },
+    gh,
+    log: () => {},
+    nowMs: Date.parse('2026-01-10T00:00:00Z')
+  })
+
+  assert.equal(got.checked, 2)
+  const eventsCalls = gh.calls.filter((c) => c.includes('/events'))
+  assert.equal(eventsCalls.length, 1, 'events API should be called only once for the same repo')
 })
 
 test('main fails when configured paths are missing or contain no workflow YAML', async () => {

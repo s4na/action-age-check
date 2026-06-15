@@ -90,25 +90,40 @@ class GitHub {
 
 // ---- age resolution ---------------------------------------------------------
 
+// Fetch and cache all Events API pages (up to 3) for a repo.
+// Returns an array of all events; shared across tags in the same repo.
+async function fetchRepoEvents (gh, owner, repo, cache) {
+  const key = `${owner}/${repo}`
+  if (cache.has(key)) return cache.get(key)
+  const promise = (async () => {
+    const all = []
+    for (let page = 1; page <= 3; page++) {
+      const r = await gh.get(`/repos/${owner}/${repo}/events?per_page=100&page=${page}`)
+      if (r.status === 404 || !Array.isArray(r.body) || r.body.length === 0) break
+      all.push(...r.body)
+      if (r.body.length < 100) break
+    }
+    return all
+  })()
+  cache.set(key, promise)
+  return promise
+}
+
 // Search the Events API for the server-side timestamp of a tag creation.
 // The Events API retains up to 300 events (~90 days); returns null when not found.
-async function resolveTagCreatedAt (gh, owner, repo, ref) {
-  for (let page = 1; page <= 3; page++) {
-    const r = await gh.get(`/repos/${owner}/${repo}/events?per_page=100&page=${page}`)
-    if (r.status === 404 || !Array.isArray(r.body) || r.body.length === 0) return null
-    for (const ev of r.body) {
-      if (ev.type === 'CreateEvent' && ev.payload?.ref_type === 'tag' && ev.payload?.ref === ref) {
-        return ev.created_at
-      }
+async function resolveTagCreatedAt (gh, owner, repo, ref, eventsCache) {
+  const events = await fetchRepoEvents(gh, owner, repo, eventsCache)
+  for (const ev of events) {
+    if (ev.type === 'CreateEvent' && ev.payload?.ref_type === 'tag' && ev.payload?.ref === ref) {
+      return ev.created_at
     }
-    if (r.body.length < 100) break
   }
   return null
 }
 
 // Resolve the "publication date" of a remote use, preferring trustworthy bases.
 // Returns { date, basis, note? } | { branch:true } | { notFound:true }
-async function resolveAge (gh, use) {
+async function resolveAge (gh, use, eventsCache) {
   const { owner, repo, ref } = use
 
   if (isSha(ref)) {
@@ -128,8 +143,7 @@ async function resolveAge (gh, use) {
   }
 
   // 2) Events API created_at — server-side timestamp, cannot be forged by the committer.
-  //    Limited to ~300 events (roughly 90 days for low-traffic repos); falls through to git-object dates when not found.
-  const eventDate = await resolveTagCreatedAt(gh, owner, repo, ref)
+  const eventDate = await resolveTagCreatedAt(gh, owner, repo, ref, eventsCache)
   if (eventDate) {
     return { date: eventDate, basis: 'event' }
   }
@@ -256,12 +270,23 @@ async function main (options = {}) {
 
   const checked = violations.length + pending.length
 
-  const settled = await Promise.allSettled(
-    pending.map((entry) => resolveAge(gh, entry.use).then((info) => ({ entry, info })))
+  // Deduplicate: resolve each unique owner/repo@ref once, share result across occurrences
+  const useKey = (u) => `${u.owner}/${u.repo}@${u.ref}`
+  const eventsCache = new Map()
+  const ageCache = new Map()
+  for (const entry of pending) {
+    const k = useKey(entry.use)
+    if (!ageCache.has(k)) {
+      ageCache.set(k, resolveAge(gh, entry.use, eventsCache))
+    }
+  }
+
+  const results = await Promise.allSettled(
+    pending.map((entry) => ageCache.get(useKey(entry.use)).then((info) => ({ entry, info })))
   )
 
-  for (let i = 0; i < settled.length; i++) {
-    const result = settled[i]
+  for (let i = 0; i < results.length; i++) {
+    const result = results[i]
     if (result.status === 'rejected') {
       const err = result.reason
       const entry = pending[i]
@@ -350,6 +375,7 @@ module.exports = {
   collectFiles,
   escapeCommandMessage,
   escapeCommandProperty,
+  fetchRepoEvents,
   main,
   resolveAge,
   resolveTagCreatedAt
