@@ -15,7 +15,7 @@ inputs:
     required: false
     default: '.github/workflows'
   allow:
-    description: 'Newline-separated allowlist (owner/repo or owner/repo@ref) to exclude from the age check.'
+    description: 'Newline-separated allowlist (owner/repo or owner/repo@ref). Listed actions are trusted and pass the age gate without being checked.'
     required: false
     default: ''
   fail-level:
